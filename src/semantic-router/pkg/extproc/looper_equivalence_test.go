@@ -597,3 +597,39 @@ func TestLooperEquivalence(t *testing.T) {
 		})
 	}
 }
+
+func TestFusionProviderWirePreservesClientMaxCompletionTokens(t *testing.T) {
+	fixture := looperFixture{
+		name:    "fusion-client-output-token-ceiling",
+		request: `{"model":"vllm-sr/auto","max_completion_tokens":1024,"messages":[{"role":"user","content":"What is the capital of France?"}]}`,
+		decision: `
+      modelRefs: [{model: model-a}, {model: model-b}]
+      algorithm:
+        type: fusion
+        fusion:
+          model: judge
+          analysis_models: [model-a, model-b]
+          analysis_mode: one_call
+          max_concurrent: 2
+          min_successful_responses: 2
+          max_completion_tokens: 8192`,
+	}
+	harness := newLooperHarness(t, fixture)
+	for _, adapter := range []string{"extproc", "sessions"} {
+		t.Run(adapter, func(t *testing.T) {
+			record := harness.serve(t, looperAdapters[adapter](harness.router), fixture.request)
+			if len(record.Calls) == 0 {
+				t.Fatal("Fusion should dispatch provider requests")
+			}
+			for _, call := range record.Calls {
+				var wire map[string]json.RawMessage
+				if err := json.Unmarshal(call.Body, &wire); err != nil {
+					t.Fatalf("decode provider request for %s: %v", call.Model, err)
+				}
+				if got := string(wire["max_completion_tokens"]); got != "1024" {
+					t.Errorf("provider request for %s max_completion_tokens = %s, want 1024", call.Model, got)
+				}
+			}
+		})
+	}
+}
